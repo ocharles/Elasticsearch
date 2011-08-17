@@ -9,9 +9,11 @@ Category:            Web
 Build-type:          Simple
 Cabal-version:       >=1.2
 
-Executable test
+Library
   hs-source-dirs: src
-  main-is: Main.hs
+
+  exposed-modules:
+    Search.ElasticSearch
 
   Build-depends:
     base >= 4 && < 5,

@@ -2,7 +2,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 -- | Haskell bindings to the REST servire provided by elasticsearch.
-module ElasticSearch
+module Search.ElasticSearch
        ( -- * elasticsearch connection
          ElasticSearch(..)
        , localServer
