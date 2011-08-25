@@ -39,7 +39,7 @@ import Network.BufferType         (buf_fromStr, buf_empty, bufferOps, BufferType
 import Network.HTTP               (Request(..), RequestMethod(..), simpleHTTP
                                   ,Header(..), HeaderName(..), Response(..))
 import Network.URI                (URI(..), parseRelativeReference, relativeTo
-                                  ,parseURI)
+                                  ,parseURI, isUnescapedInURI, escapeURIString)
 
 --------------------------------------------------------------------------------
 -- | A type of document, with a phantom type back to the document itself.
@@ -124,7 +124,7 @@ search es index query =
   where dt = unDocumentType (documentType :: DocumentType doc)
         path = case combineParts [ index, dt, "_search" ] of
           Nothing -> error "Could not form search query"
-          Just uri -> uri { uriQuery = "?q=" ++ T.unpack query }
+          Just uri -> uri { uriQuery = "?q=" ++ escapeURIString isUnescapedInURI (T.unpack query) }
         parseSearchResults sJson = case parse json sJson of
           (Done rest r) -> case parseEither parseJSON r of
             Right res -> return res
