@@ -12,10 +12,12 @@ module Search.ElasticSearch
        , DocumentType(..)
 
          -- * Indexing
+       , Index
        , indexDocument
 
          -- * Searching
        , SearchResults(getResults)
+       , SearchResult(score, result)
        , search
        ) where
 
@@ -30,7 +32,7 @@ import qualified Data.Text as T
 import Data.Attoparsec.Lazy       (parse, Result(..))
 import Data.Aeson                 (FromJSON, ToJSON, encode, json, parseJSON
                                   ,Value(..), (.:))
-import Data.Aeson.Types           (parseEither)
+import Data.Aeson.Types           (parseEither, typeMismatch)
 import Data.Text                  (Text)
 import Network.BufferType         (buf_fromStr, buf_empty, bufferOps, BufferType
                                   ,BufferOp)
@@ -75,6 +77,10 @@ localServer = ElasticSearch { esEndPoint = fromJust localUri
   where localUri = parseURI "http://127.0.0.1:9200/"
 
 --------------------------------------------------------------------------------
+-- | The name of an index.
+type Index = String
+
+--------------------------------------------------------------------------------
 -- | Index a given document, under a given index.
 indexDocument :: (Document a)
               => ElasticSearch  -- ^ The elasticsearch server to use.
@@ -88,14 +94,21 @@ indexDocument es index document =
 
 --------------------------------------------------------------------------------
 -- | Run a given search query.
-newtype SearchResults d = SearchResults { getResults :: [d] }
-                          deriving (Show)
+newtype SearchResults d = SearchResults { getResults :: [SearchResult d] }
+
+data SearchResult d = SearchResult { score :: Double
+                                   , result :: d
+                                   }
 
 instance (FromJSON d) => FromJSON (SearchResults d) where
   parseJSON (Object v) = SearchResults <$> results
-    where results = (v .: "hits") >>= (.: "hits") >>= mapM mapResult
-          mapResult r = r .: "_source" >>= parseJSON
-  parseJSON _ = empty
+    where results = (v .: "hits") >>= (.: "hits") >>= mapM parseJSON
+  parseJSON v = typeMismatch "SearchResults" v
+
+instance (FromJSON d) => FromJSON (SearchResult d) where
+  parseJSON (Object o) = SearchResult <$> o .: "_score"
+                                      <*> (o .: "_source" >>= parseJSON)
+  parseJSON v = typeMismatch "SearchResult" v
 
 search :: forall doc. Document doc
        => ElasticSearch
