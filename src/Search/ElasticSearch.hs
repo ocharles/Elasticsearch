@@ -118,20 +118,26 @@ search :: forall doc. Document doc
        -- ^ The elasticsearch server to use.
        -> String
        -- ^ The index to search.
+       -> Integer
+       -- ^ The offset into the results.
        -> Text
        -- ^ The search query.
        -> IO (SearchResults doc)
        -- ^ A list of matching documents.
-search es index query =
+search es index offset query =
     dispatchRequest es GET path Nothing >>= parseSearchResults
   where dt = unDocumentType (documentType :: DocumentType doc)
         path = case combineParts [ index, dt, "_search" ] of
           Nothing -> error "Could not form search query"
-          Just uri -> uri { uriQuery = "?q=" ++ escapeURIString isUnescapedInURI (T.unpack query) }
+          Just uri ->
+            uri { uriQuery = "?" ++ intercalate "&" queryParts }
         parseSearchResults sJson = case parse json sJson of
-          (Done rest r) -> case parseEither parseJSON r of
+          (Done _ r) -> case parseEither parseJSON r of
             Right res -> return res
             Left e -> error e
+        queryParts = [ "q", escapeURIString isUnescapedInURI (T.unpack query)
+                     , "from", show offset
+                     ]
 
 --------------------------------------------------------------------------------
 -- Private API
