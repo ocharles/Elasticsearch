@@ -16,7 +16,7 @@ module Search.ElasticSearch
        , indexDocument
 
          -- * Searching
-       , SearchResults(getResults)
+       , SearchResults(getResults, totalHits)
        , SearchResult(score, result)
        , search
        ) where
@@ -94,15 +94,18 @@ indexDocument es index document =
 
 --------------------------------------------------------------------------------
 -- | Run a given search query.
-newtype SearchResults d = SearchResults { getResults :: [SearchResult d] }
+data SearchResults d = SearchResults { getResults :: [SearchResult d]
+                                     , totalHits :: Int
+                                     }
 
 data SearchResult d = SearchResult { score :: Double
                                    , result :: d
                                    }
 
 instance (FromJSON d) => FromJSON (SearchResults d) where
-  parseJSON (Object v) = SearchResults <$> results
+  parseJSON (Object v) = SearchResults <$> results <*> hits
     where results = (v .: "hits") >>= (.: "hits") >>= mapM parseJSON
+          hits = (v .: "hits") >>= (.: "total")
   parseJSON v = typeMismatch "SearchResults" v
 
 instance (FromJSON d) => FromJSON (SearchResult d) where
