@@ -60,7 +60,7 @@ data ElasticSearch = ElasticSearch
 -- elasticsearch.
 class (FromJSON doc, ToJSON doc) => Document doc where
    -- | Gets the key for a given document.
-  documentKey  :: doc -> String
+  documentKey  :: doc -> Text
 
   -- | Gets the type for a given document. The type is used to specify where in
   -- an index this document should be stored.
@@ -145,9 +145,10 @@ docType _ = unDocumentType ( documentType :: DocumentType doc )
 
 documentIndexPath :: (Document doc) => doc -> String -> URI
 documentIndexPath doc index =
-  case combineParts [ index, docType doc, documentKey doc ] of
+  case combineParts [ index, docType doc, key doc ] of
     Nothing -> error "Could not construct document path"
     Just p -> p
+  where key = escapeURIString isUnescapedInURI . T.unpack . documentKey
 
 dispatchRequest :: ElasticSearch -> RequestMethod -> URI -> Maybe BS.ByteString
                 -> IO BS.ByteString
