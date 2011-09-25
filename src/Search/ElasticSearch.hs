@@ -95,7 +95,7 @@ indexDocument es index document =
 --------------------------------------------------------------------------------
 -- | Run a given search query.
 data SearchResults d = SearchResults { getResults :: [SearchResult d]
-                                     , totalHits :: Int
+                                     , totalHits :: Integer
                                      }
 
 data SearchResult d = SearchResult { score :: Double
