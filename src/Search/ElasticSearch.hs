@@ -39,7 +39,8 @@ import Network.BufferType         (buf_fromStr, buf_empty, bufferOps, BufferType
 import Network.HTTP               (Request(..), RequestMethod(..), simpleHTTP
                                   ,Header(..), HeaderName(..), Response(..))
 import Network.URI                (URI(..), parseRelativeReference, relativeTo
-                                  ,parseURI, isUnescapedInURI, escapeURIString)
+                                  ,parseURI, isUnescapedInURI, escapeURIString
+                                  ,isUnreserved)
 
 --------------------------------------------------------------------------------
 -- | A type of document, with a phantom type back to the document itself.
@@ -130,13 +131,14 @@ search es index offset query =
         path = case combineParts [ index, dt, "_search" ] of
           Nothing -> error "Could not form search query"
           Just uri ->
-            uri { uriQuery = "?" ++ intercalate "&" queryParts }
+            uri { uriQuery = "?" ++ queryString }
         parseSearchResults sJson = case parse json sJson of
           (Done _ r) -> case parseEither parseJSON r of
             Right res -> return res
             Left e -> error e
-        queryParts = [ "q", escapeURIString isUnescapedInURI (T.unpack query)
-                     , "from", show offset
+        queryString = intercalate "&" $ (\(k, v) -> k ++ "=" ++ v) `map` queryParts
+        queryParts = [ ("q", escapeURIString isUnescapedInURI (T.unpack query))
+                     , ("from", show offset)
                      ]
 
 --------------------------------------------------------------------------------
@@ -152,9 +154,9 @@ docType _ = unDocumentType ( documentType :: DocumentType doc )
 documentIndexPath :: (Document doc) => doc -> String -> URI
 documentIndexPath doc index =
   case combineParts [ index, docType doc, key doc ] of
-    Nothing -> error "Could not construct document path"
+    Nothing -> error ("Could not construct document path: " ++ show [index, docType doc, key doc])
     Just p -> p
-  where key = escapeURIString isUnescapedInURI . T.unpack . documentKey
+  where key = escapeURIString isUnreserved . T.unpack . documentKey
 
 dispatchRequest :: ElasticSearch -> RequestMethod -> URI -> Maybe BS.ByteString
                 -> IO BS.ByteString
