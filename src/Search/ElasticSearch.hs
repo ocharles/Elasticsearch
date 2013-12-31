@@ -1,5 +1,5 @@
+{-# LANGUAGE OverloadedStrings   #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE OverloadedStrings #-}
 
 -- | Haskell bindings to the REST servire provided by elasticsearch.
 module Search.ElasticSearch
@@ -11,9 +11,14 @@ module Search.ElasticSearch
        , Document(..)
        , DocumentType(..)
 
+         -- * Index admin
+       , createIndex
+       , deleteIndex
+
          -- * Indexing
        , Index
        , indexDocument
+       , bulkIndexDocuments
 
          -- * Searching
        , SearchResults(getResults, totalHits)
@@ -21,26 +26,31 @@ module Search.ElasticSearch
        , search
        ) where
 
-import Control.Applicative
-import Data.List                  (intercalate)
-import Data.Maybe                 (fromJust)
+import           Control.Applicative
+import           Data.List                  (intercalate)
+import           Data.Maybe                 (fromJust)
 
-import qualified Data.ByteString.Lazy as BS
+import qualified Data.ByteString.Lazy       as BS
 import qualified Data.ByteString.Lazy.Char8 as Char8
-import qualified Data.Text as T
+import qualified Data.Text                  as T
 
-import Data.Attoparsec.Lazy       (parse, Result(..))
-import Data.Aeson                 (FromJSON, ToJSON, encode, json, parseJSON
-                                  ,Value(..), (.:))
-import Data.Aeson.Types           (parseEither, typeMismatch)
-import Data.Text                  (Text)
-import Network.BufferType         (buf_fromStr, buf_empty, bufferOps, BufferType
-                                  ,BufferOp)
-import Network.HTTP               (Request(..), RequestMethod(..), simpleHTTP
-                                  ,Header(..), HeaderName(..), Response(..))
-import Network.URI                (URI(..), parseRelativeReference, relativeTo
-                                  ,parseURI, isUnescapedInURI, escapeURIString
-                                  ,isUnreserved)
+import           Control.Monad
+import           Data.Aeson                 (FromJSON, ToJSON, Value (..),
+                                             encode, json, parseJSON, (.:),
+                                             (.=))
+import           Data.Aeson.Types           (object, parseEither, typeMismatch)
+import           Data.Attoparsec.Lazy       (Result (..), parse)
+import           Data.List.Split            (chunksOf)
+import           Data.Text                  (Text)
+import           Network.BufferType         (BufferOp, BufferType, buf_empty,
+                                             buf_fromStr, bufferOps)
+import           Network.HTTP               (Header (..), HeaderName (..),
+                                             Request (..), RequestMethod (..),
+                                             Response (..), simpleHTTP)
+import           Network.URI                (URI (..), escapeURIString,
+                                             isUnescapedInURI, isUnreserved,
+                                             parseRelativeReference, parseURI,
+                                             relativeTo)
 
 --------------------------------------------------------------------------------
 -- | A type of document, with a phantom type back to the document itself.
@@ -50,7 +60,7 @@ newtype DocumentType a = DocumentType { unDocumentType :: String }
 -- | A connection an elasticsearch server.
 data ElasticSearch = ElasticSearch
     { -- | The URI to @/@ of this instance.
-      esEndPoint :: URI
+      esEndPoint  :: URI
 
       -- | The user agent to make requests with.
     , esUserAgent :: String
@@ -82,6 +92,30 @@ localServer = ElasticSearch { esEndPoint = fromJust localUri
 type Index = String
 
 --------------------------------------------------------------------------------
+-- | Create an index
+createIndex :: ElasticSearch -- ^ The elasticsearch server to use.
+            -> String             -- ^ Index name
+            -> Maybe Int          -- ^ Shards
+            -> Maybe Int          -- ^ Replicas
+            -> IO ()
+createIndex es name shards replicas =
+  void $ dispatchRequest es PUT path settings
+  where Just path = parseRelativeReference ("/" ++ name)
+        settings  = Just $ encode [a .= b | (a,Just b) <- [("replicas", replicas)
+                                                          ,("shards", shards)]]
+
+--------------------------------------------------------------------------------
+-- | Delete an index
+deleteIndex :: ElasticSearch -- ^ The elasticsearch server to use.
+            -> String             -- ^ Index name
+            -> IO ()
+deleteIndex es name  =
+  void $ dispatchRequest es DELETE path settings
+  where Just path = parseRelativeReference ("/" ++ name)
+        settings  = Just $ encode ([] :: [Int])
+
+
+--------------------------------------------------------------------------------
 -- | Index a given document, under a given index.
 indexDocument :: (Document a)
               => ElasticSearch  -- ^ The elasticsearch server to use.
@@ -94,12 +128,42 @@ indexDocument es index document =
         docJson = Just $ encode document
 
 --------------------------------------------------------------------------------
+-- | Index a given document, under a given index.
+bulkIndexDocuments :: (Document a)
+                   => ElasticSearch     -- ^ The elasticsearch server to use.
+                   -> String            -- ^ The index to index this document under.
+                   -> Maybe Int         -- ^ Optional chunk size
+                   -> [a]               -- ^ The documents to index.
+                   -> IO ()
+                   -- this may need to change to guarantee a
+                   -- bounded-memory usage pattern.
+bulkIndexDocuments es index mchunk documents  =
+    mapM_ (dispatchRequest es PUT bulkEndpoint . Just . aggregateRep index) $
+      chunksOf chunkSize documents
+  where -- path = documentIndexPath document index
+        chunkSize = maybe 1000 id mchunk
+        Just bulkEndpoint = parseRelativeReference "/_bulk"
+
+aggregateRep :: forall doc. Document doc => String -> [doc] -> Char8.ByteString
+aggregateRep index docs = (Char8.intercalate "\n" $ map inlineRep docs) `Char8.append` "\n"
+  where
+    inlineRep :: Document a => a -> Char8.ByteString
+    inlineRep doc = Char8.intercalate "\n"
+                    [ encode (object ["index" .= object [
+                                         "_index".= index,
+                                         "_type" .= t,
+                                         "_id"   .= documentKey doc ]])
+                    , encode doc]
+      where t :: String
+            t = unDocumentType (documentType :: DocumentType doc)
+
+--------------------------------------------------------------------------------
 -- | Run a given search query.
 data SearchResults d = SearchResults { getResults :: [SearchResult d]
-                                     , totalHits :: Integer
+                                     , totalHits  :: Integer
                                      }
 
-data SearchResult d = SearchResult { score :: Double
+data SearchResult d = SearchResult { score  :: Double
                                    , result :: d
                                    }
 
@@ -136,6 +200,7 @@ search es index offset query =
           (Done _ r) -> case parseEither parseJSON r of
             Right res -> return res
             Left e -> error e
+          (Fail a b c) -> error $ show (a,b,c)
         queryString = intercalate "&" $ (\(k, v) -> k ++ "=" ++ v) `map` queryParts
         queryParts = [ ("q", escapeURIString isUnescapedInURI (T.unpack query))
                      , ("from", show offset)
@@ -161,7 +226,7 @@ documentIndexPath doc index =
 dispatchRequest :: ElasticSearch -> RequestMethod -> URI -> Maybe BS.ByteString
                 -> IO BS.ByteString
 dispatchRequest es method apiCall body =
-  case uri' of
+  case Just uri' of
     Nothing -> error "Could not formulate correct API call URI"
     Just uri -> do
       resp' <- simpleHTTP (req uri)

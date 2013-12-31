@@ -1,5 +1,5 @@
 Name:                elasticsearch
-Version:             0.1
+Version:             0.2
 License:             AllRightsReserved
 
 Author:              Oliver Charles
@@ -7,7 +7,7 @@ Maintainer:          elasticsearch@ocharles.org.uk
 Stability:           Experimental
 Category:            Web
 Build-type:          Simple
-Cabal-version:       >=1.2
+Cabal-version:       >=1.8
 
 Library
   hs-source-dirs: src
@@ -17,12 +17,13 @@ Library
 
   Build-depends:
     base >= 4 && < 5,
-    bytestring >= 0.9.1 && < 0.10,
+    bytestring >= 0.9.1 && < 0.11,
     text >= 0.11 && < 0.12,
     aeson >= 0.3.2.11,
     network >= 2.3.0.2,
     HTTP >= 4000.1.1,
-    attoparsec >= 0.9.1.1
+    attoparsec >= 0.9.1.1,
+    split
 
   extensions: TypeSynonymInstances MultiParamTypeClasses
 
@@ -32,4 +33,15 @@ Library
   else
     ghc-options: -threaded -Wall -fwarn-tabs -funbox-strict-fields -O2
                  -fno-warn-orphans
-
+test-suite tests
+  type:            exitcode-stdio-1.0
+  ghc-options:     -Wall -threaded
+  hs-source-dirs:  test/
+  main-is:         Spec.hs
+  -- default-language:    Haskell2010
+  build-depends:   base,
+                   elasticsearch,
+                   hspec,
+                   aeson,
+                   transformers,
+                   text
