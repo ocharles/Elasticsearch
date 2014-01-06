@@ -19,6 +19,8 @@ module Search.ElasticSearch
        , Index
        , indexDocument
        , bulkIndexDocuments
+       , waitForYellow
+       , refresh
 
          -- * Searching
        , SearchResults(getResults, totalHits)
@@ -205,6 +207,14 @@ search es index offset query =
         queryParts = [ ("q", escapeURIString isUnescapedInURI (T.unpack query))
                      , ("from", show offset)
                      ]
+
+refresh es index = do
+  void $ dispatchRequest es GET path Nothing
+    where Just path = parseRelativeReference (index ++ "/_refresh")
+
+waitForYellow :: ElasticSearch -> IO ()
+waitForYellow es = void $ dispatchRequest es GET path Nothing
+    where Just path = parseRelativeReference ("/_cluster/health?wait_for_status=yellow")
 
 --------------------------------------------------------------------------------
 -- Private API

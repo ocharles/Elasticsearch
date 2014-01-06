@@ -41,7 +41,8 @@ spec = describe "Search.ElasticSearch" $ do
       create = liftIO $ createIndex localServer twitterIndex Nothing Nothing
 
       -- I wish I didn't have to do this.
-      breathe = liftIO $ threadDelay 1000000
+      -- breathe = liftIO $ threadDelay 1000000
+      breathe = liftIO $ waitForYellow localServer >> refresh localServer twitterIndex
       findOllie :: IO (SearchResults Tweet)
       findOllie = search localServer twitterIndex 0 "user:ollie"
 
@@ -50,6 +51,7 @@ spec = describe "Search.ElasticSearch" $ do
 
     delete
     create
+    breathe
     docs <- liftIO findOllie
     (map result $ getResults docs) `shouldBe` []
     indexDocument localServer twitterIndex tweet
@@ -59,12 +61,14 @@ spec = describe "Search.ElasticSearch" $ do
     delete
 
   it "can handle bulk requests" $ do
-    let tweets = [ Tweet ("hello world " ++ show x) "Ollie" | x <- [1..50]]
+    let docNum = 100000
+    let tweets = [ Tweet ("hello world " ++ show x) "Ollie" | x <- [1..docNum]]
     delete
     create
+    breathe
     docs <- liftIO $ findOllie
     (map result $ getResults docs) `shouldBe` []
     bulkIndexDocuments localServer twitterIndex (Just 10) tweets
     breathe
     newdocs <- liftIO $ findOllie
-    (totalHits newdocs) `shouldBe` 50
+    (totalHits newdocs) `shouldBe` docNum
