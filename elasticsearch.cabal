@@ -44,4 +44,5 @@ test-suite tests
                    hspec,
                    aeson,
                    transformers,
-                   text
+                   text,
+                   async
