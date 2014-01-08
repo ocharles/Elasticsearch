@@ -3,15 +3,15 @@ module Search.ElasticSearchSpec where
 
 import           Control.Applicative
 import           Control.Concurrent
+import           Control.Concurrent.Async
 import           Control.Exception
+import           Control.Monad
 import           Control.Monad.IO.Class
 import           Data.Aeson
-import qualified Data.Text              as Text
+import qualified Data.Text                as Text
 import           Search.ElasticSearch
 import           Test.Hspec
 
-
--- TODO work out why we need to sleep for a second
 -- TODO get a better bracket pattern, the ES functions throw exceptions.
 
 data Tweet = Tweet String String
@@ -61,14 +61,32 @@ spec = describe "Search.ElasticSearch" $ do
     delete
 
   it "can handle bulk requests" $ do
-    let docNum = 100000
-    let tweets = [ Tweet ("hello world " ++ show x) "Ollie" | x <- [1..docNum]]
-    delete
-    create
-    breathe
-    docs <- liftIO $ findOllie
-    (map result $ getResults docs) `shouldBe` []
-    bulkIndexDocuments localServer twitterIndex (Just 10) tweets
-    breathe
-    newdocs <- liftIO $ findOllie
-    (totalHits newdocs) `shouldBe` docNum
+      let docNum = 100000
+      let tweets = [ Tweet ("hello world " ++ show x) "Ollie" | x <- [1..docNum]]
+      delete
+      create
+      breathe
+      docs <- liftIO $ findOllie
+      (map result $ getResults docs) `shouldBe` []
+      bulkIndexDocuments localServer twitterIndex (Just 10) tweets
+      breathe
+      newdocs <- liftIO $ findOllie
+      (totalHits newdocs) `shouldBe` docNum
+
+  it "can handle simultaneous bulk requests" $ do
+      let docNum = 1000
+          numThreads = 199
+          writerThread :: Int -> IO (SearchResults Tweet)
+          writerThread n = do
+            bulkIndexDocuments localServer twitterIndex (Just 47)
+              [ Tweet (show x) (show n) | x <- [1..docNum]]
+            --refresh localServer twitterIndex
+            breathe
+            search localServer twitterIndex 0 (Text.pack $ "user:" ++ show n)
+      delete
+      create
+      breathe
+
+      threads <- liftIO $ forM [1..numThreads] (async . writerThread)
+      results <- liftIO $ mapM wait threads
+      map totalHits results `shouldBe` replicate numThreads docNum
