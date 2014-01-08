@@ -29,6 +29,8 @@ instance FromJSON Tweet where
   parseJSON (Object o) = Tweet <$> o .: "tweet"
                                <*> o .: "user"
 
+fakeBulk s i _ docs = forM_ docs $ \d -> indexDocument s i d
+
 spec :: Spec
 spec = describe "Search.ElasticSearch" $ do
   let twitterIndex = "twitter"
@@ -73,6 +75,23 @@ spec = describe "Search.ElasticSearch" $ do
       newdocs <- liftIO $ findOllie
       (totalHits newdocs) `shouldBe` docNum
 
+  it "can handle many simultaneous individual requests" $ do
+      let docNum = 1000
+          numThreads = 199
+          writerThread :: Int -> IO (SearchResults Tweet)
+          writerThread n = do
+            fakeBulk localServer twitterIndex (Just 47)
+              [ Tweet (show x) (show n) | x <- [1..docNum]]
+            breathe
+            search localServer twitterIndex 0 (Text.pack $ "user:" ++ show n)
+      delete
+      create
+      breathe
+
+      threads <- liftIO $ forM [1..numThreads] (async . writerThread)
+      results <- liftIO $ mapM wait threads
+      map totalHits results `shouldBe` replicate numThreads docNum
+
   it "can handle simultaneous bulk requests" $ do
       let docNum = 1000
           numThreads = 199
@@ -80,7 +99,6 @@ spec = describe "Search.ElasticSearch" $ do
           writerThread n = do
             bulkIndexDocuments localServer twitterIndex (Just 47)
               [ Tweet (show x) (show n) | x <- [1..docNum]]
-            --refresh localServer twitterIndex
             breathe
             search localServer twitterIndex 0 (Text.pack $ "user:" ++ show n)
       delete
