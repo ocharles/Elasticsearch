@@ -10,6 +10,10 @@ module Search.ElasticSearch
          -- * Documents
        , Document(..)
        , DocumentType(..)
+       , BulkResults(..)
+       , BulkResult(..)
+       , Operation (..)
+
 
          -- * Index admin
        , createIndex
@@ -30,7 +34,7 @@ module Search.ElasticSearch
 
 import           Control.Applicative
 import           Data.List                  (intercalate)
-import           Data.Maybe                 (fromJust)
+import           Data.Maybe                 (catMaybes, fromJust, isNothing)
 
 import qualified Data.ByteString.Lazy       as BS
 import qualified Data.ByteString.Lazy.Char8 as Char8
@@ -38,8 +42,8 @@ import qualified Data.Text                  as T
 
 import           Control.Monad
 import           Data.Aeson                 (FromJSON, ToJSON, Value (..),
-                                             encode, json, parseJSON, (.:),
-                                             (.=))
+                                             decode, encode, json, parseJSON,
+                                             (.:), (.=))
 import           Data.Aeson.Types           (object, parseEither, typeMismatch)
 import           Data.Attoparsec.Lazy       (Result (..), parse)
 import           Data.List.Split            (chunksOf)
@@ -57,6 +61,40 @@ import           Network.URI                (URI (..), escapeURIString,
 --------------------------------------------------------------------------------
 -- | A type of document, with a phantom type back to the document itself.
 newtype DocumentType a = DocumentType { unDocumentType :: String }
+
+
+--------------------------------------------------------------------------------
+-- | The result type from a bulk indexing operation
+
+data Operation = Index
+               deriving (Show,Eq)
+data BulkResults = BulkResults [BulkResult]
+                 deriving (Show,Eq)
+data BulkResult = BulkResult { br_op      :: Operation
+                             , br_ok      :: Bool
+                             , br_index   :: Char8.ByteString
+                             , br_id      :: Char8.ByteString
+                             , br_type    :: Char8.ByteString
+                             , br_version :: Int
+                             }
+                deriving (Show,Eq)
+
+instance FromJSON BulkResults where
+  parseJSON (Object o) = do
+    res <- mapM parseJSON =<< (o .: "items")
+    return $ BulkResults res
+
+-- TODO not just "index"
+instance FromJSON BulkResult where
+  parseJSON (Object o) = do
+    body <- o .: "index"
+    BulkResult
+      <$> return Index
+      <*> body .: "ok"
+      <*> body .: "_index"
+      <*> body .: "_id"
+      <*> body .: "_type"
+      <*> body .: "_version"
 
 --------------------------------------------------------------------------------
 -- | A connection an elasticsearch server.
@@ -136,12 +174,21 @@ bulkIndexDocuments :: (Document a)
                    -> String            -- ^ The index to index this document under.
                    -> Maybe Int         -- ^ Optional chunk size
                    -> [a]               -- ^ The documents to index.
-                   -> IO ()
-                   -- this may need to change to guarantee a
-                   -- bounded-memory usage pattern.
-bulkIndexDocuments es index mchunk documents  =
-    mapM_ (dispatchRequest es PUT bulkEndpoint . Just . aggregateRep index) $
-      chunksOf chunkSize documents
+                   -> IO ([Char8.ByteString], [Char8.ByteString])
+                                        -- ^ successful & unsuccessful edits
+bulkIndexDocuments es index mchunk documents  = do
+    results <- mapM (dispatchRequest es PUT bulkEndpoint . Just . aggregateRep index) $
+               chunksOf chunkSize documents
+    let parsed = map decode results :: [Maybe BulkResults]
+        goodParsed = (concatMap (\(BulkResults b) -> b) $ catMaybes parsed) :: [BulkResult]
+        failures = map br_id $ filter (not . br_ok) goodParsed
+        successes = map br_id $ filter br_ok goodParsed
+
+    forM_ (filter (isNothing . fst) $ zip parsed results) $ \(_,x) -> do
+      putStrLn "Bad parse"
+      print x
+
+    return (failures, successes)
   where -- path = documentIndexPath document index
         chunkSize = maybe 1000 id mchunk
         Just bulkEndpoint = parseRelativeReference "/_bulk"
@@ -154,6 +201,7 @@ aggregateRep index docs = (Char8.intercalate "\n" $ map inlineRep docs) `Char8.a
                     [ encode (object ["index" .= object [
                                          "_index".= index,
                                          "_type" .= t,
+                                         "_refresh" .= True,
                                          "_id"   .= documentKey doc ]])
                     , encode doc]
       where t :: String

@@ -45,4 +45,5 @@ test-suite tests
                    aeson,
                    transformers,
                    text,
-                   async
+                   async,
+                   bytestring

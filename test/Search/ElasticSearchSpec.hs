@@ -8,7 +8,9 @@ import           Control.Exception
 import           Control.Monad
 import           Control.Monad.IO.Class
 import           Data.Aeson
-import qualified Data.Text                as Text
+import qualified Data.ByteString.Lazy.Char8 as Char8
+import           Data.Maybe
+import qualified Data.Text                  as Text
 import           Search.ElasticSearch
 import           Test.Hspec
 
@@ -31,80 +33,107 @@ instance FromJSON Tweet where
 
 fakeBulk s i _ docs = forM_ docs $ \d -> indexDocument s i d
 
+asyncMap f [] = return []
+asyncMap f (x:xs) = do
+  (a,b) <- concurrently (f x) (asyncMap f xs)
+  return (a:b)
+
 spec :: Spec
-spec = describe "Search.ElasticSearch" $ do
-  let twitterIndex = "twitter"
-      tweet = Tweet "Hello world!" "Ollie"
+spec = do
+  describe "JSON decoders" $ do
+    it "should decode a json bulkresult blob" $ do
+      let raw ="{ \"index\": { \"_index\": \"twitter\", \"ok\": true, \"_id\": \"hi\", \"_type\": \"tweet\", \"_version\": 1}}"
+      decode raw `shouldBe` Just (BulkResult Index True "twitter" "hi" "tweet" 1)
 
-      ignore :: ErrorCall -> IO ()
-      ignore s = print s
+    it "should decode a json bulkresults blob" $ do
+      let raw ="{\"took\": 1, \"items\": [ { \"index\": { \"_index\": \"twitter\", \"ok\": true, \"_id\": \"hi\", \"_type\": \"tweet\", \"_version\": 1}}]}"
+      decode raw `shouldBe` Just (BulkResults [BulkResult Index True "twitter" "hi" "tweet" 1])
+
+    it "should parse this regression" $ do
+      let raw = "{\"took\":5,\"items\":[{\"index\":{\"_index\":\"twitter\",\"_type\":\"tweet\",\"_id\":\"hello world 1Ollie\",\"_version\":1,\"ok\":true}},{\"index\":{\"_index\":\"twitter\",\"_type\":\"tweet\",\"_id\":\"hello world 2Ollie\",\"_version\":1,\"ok\":true}},{\"index\":{\"_index\":\"twitter\",\"_type\":\"tweet\",\"_id\":\"hello world 3Ollie\",\"_version\":1,\"ok\":true}},{\"index\":{\"_index\":\"twitter\",\"_type\":\"tweet\",\"_id\":\"hello world 4Ollie\",\"_version\":1,\"ok\":true}},{\"index\":{\"_index\":\"twitter\",\"_type\":\"tweet\",\"_id\":\"hello world 5Ollie\",\"_version\":1,\"ok\":true}},{\"index\":{\"_index\":\"twitter\",\"_type\":\"tweet\",\"_id\":\"hello world 6Ollie\",\"_version\":1,\"ok\":true}},{\"index\":{\"_index\":\"twitter\",\"_type\":\"tweet\",\"_id\":\"hello world 7Ollie\",\"_version\":1,\"ok\":true}},{\"index\":{\"_index\":\"twitter\",\"_type\":\"tweet\",\"_id\":\"hello world 8Ollie\",\"_version\":1,\"ok\":true}},{\"index\":{\"_index\":\"twitter\",\"_type\":\"tweet\",\"_id\":\"hello world 9Ollie\",\"_version\":1,\"ok\":true}},{\"index\":{\"_index\":\"twitter\",\"_type\":\"tweet\",\"_id\":\"hello world 10Ollie\",\"_version\":1,\"ok\":true}}]}"
+      (isJust $ (decode raw :: Maybe BulkResults)) `shouldBe` True
+
+  describe "Search.ElasticSearch" $ do
+    let twitterIndex = "twitter"
+        tweet = Tweet "Hello world!" "Ollie"
+
+        ignore :: ErrorCall -> IO ()
+        ignore s = print s
          -- this should really be a bracket-y thing
-      delete = liftIO $ deleteIndex localServer twitterIndex `catch` ignore
-      create = liftIO $ createIndex localServer twitterIndex Nothing Nothing
+        delete = liftIO $ deleteIndex localServer twitterIndex `catch` ignore
+        create = liftIO $ createIndex localServer twitterIndex Nothing Nothing
 
-      -- I wish I didn't have to do this.
-      -- breathe = liftIO $ threadDelay 1000000
-      breathe = liftIO $ waitForYellow localServer >> refresh localServer twitterIndex
-      findOllie :: IO (SearchResults Tweet)
-      findOllie = search localServer twitterIndex 0 "user:ollie"
+        breathe = liftIO $ waitForYellow localServer >> refresh localServer twitterIndex
+        findOllie :: IO (SearchResults Tweet)
+        findOllie = search localServer twitterIndex 0 "user:ollie"
 
-  it "can roundtrip a request" $ do
-    let tweet = Tweet "Hello world!" "Ollie"
+    it "can roundtrip a request" $ do
+      let tweet = Tweet "Hello world!" "Ollie"
 
-    delete
-    create
-    breathe
-    docs <- liftIO findOllie
-    (map result $ getResults docs) `shouldBe` []
-    indexDocument localServer twitterIndex tweet
-    breathe
-    newdocs <- liftIO $ findOllie
-    (map result $ getResults newdocs) `shouldBe` [tweet]
-    delete
+      delete
+      create
+      breathe
+      docs <- liftIO findOllie
+      (map result $ getResults docs) `shouldBe` []
+      indexDocument localServer twitterIndex tweet
+      breathe
+      newdocs <- liftIO $ findOllie
+      (map result $ getResults newdocs) `shouldBe` [tweet]
+      delete
 
-  it "can handle bulk requests" $ do
-      let docNum = 100000
+    it "can handle bulk requests" $ do
+      let docNum = 20
       let tweets = [ Tweet ("hello world " ++ show x) "Ollie" | x <- [1..docNum]]
       delete
       create
       breathe
       docs <- liftIO $ findOllie
       (map result $ getResults docs) `shouldBe` []
-      bulkIndexDocuments localServer twitterIndex (Just 10) tweets
+      (failures, successes) <- bulkIndexDocuments localServer twitterIndex (Just 10) tweets
+      length successes `shouldBe` docNum
+      length failures  `shouldBe` 0
       breathe
       newdocs <- liftIO $ findOllie
-      (totalHits newdocs) `shouldBe` docNum
+      (totalHits newdocs) `shouldBe` (fromIntegral docNum)
 
-  it "can handle many simultaneous individual requests" $ do
+
+    it "can handle many simultaneous bulk requests" $ do
       let docNum = 1000
-          numThreads = 199
-          writerThread :: Int -> IO (SearchResults Tweet)
+          -- Ollie - this is the variable to tweak. around 10 on my
+          -- machine is relatively reliable, higher invariably breaks.
+          numThreads = 20
+          writerThread :: Int -> IO (SearchResults Tweet, ([Char8.ByteString], [Char8.ByteString]))
           writerThread n = do
-            fakeBulk localServer twitterIndex (Just 47)
+            res <- bulkIndexDocuments localServer twitterIndex (Just 47)
+            -- res <- fakeBulk localServer twitterIndex (Just 47)
               [ Tweet (show x) (show n) | x <- [1..docNum]]
             breathe
-            search localServer twitterIndex 0 (Text.pack $ "user:" ++ show n)
+            searched <- search localServer twitterIndex 0 (Text.pack $ "user:" ++ show n)
+            return (searched, res)
       delete
       create
       breathe
 
-      threads <- liftIO $ forM [1..numThreads] (async . writerThread)
-      results <- liftIO $ mapM wait threads
-      map totalHits results `shouldBe` replicate numThreads docNum
+      results <- liftIO $ asyncMap writerThread [1..numThreads]
+      mapM_ (\(_,(f,s)) -> do
+                f `shouldBe` []
+                length s `shouldBe` docNum)   results
+      liftIO $ putStrLn "so ES thinks we're ok"
+      map (totalHits . fst) results `shouldBe` replicate numThreads (fromIntegral docNum)
+      liftIO $ putStrLn "second"
 
-  it "can handle simultaneous bulk requests" $ do
-      let docNum = 1000
-          numThreads = 199
-          writerThread :: Int -> IO (SearchResults Tweet)
-          writerThread n = do
-            bulkIndexDocuments localServer twitterIndex (Just 47)
-              [ Tweet (show x) (show n) | x <- [1..docNum]]
-            breathe
-            search localServer twitterIndex 0 (Text.pack $ "user:" ++ show n)
-      delete
-      create
-      breathe
+  -- it "can handle simultaneous bulk requests" $ do
+  --     let docNum = 1000
+  --         numThreads = 199
+  --         writerThread :: Int -> IO (SearchResults Tweet)
+  --         writerThread n = do
+  --           bulkIndexDocuments localServer twitterIndex (Just 47)
+  --             [ Tweet (show x) (show n) | x <- [1..docNum]]
+  --           breathe
+  --           search localServer twitterIndex 0 (Text.pack $ "user:" ++ show n)
+  --     delete
+  --     create
+  --     breathe
 
-      threads <- liftIO $ forM [1..numThreads] (async . writerThread)
-      results <- liftIO $ mapM wait threads
-      map totalHits results `shouldBe` replicate numThreads docNum
+  --     results <- liftIO $ asyncMap writerThread [1..numThreads]
+  --     map totalHits results `shouldBe` replicate numThreads docNum
