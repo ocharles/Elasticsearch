@@ -30,6 +30,10 @@ module Search.ElasticSearch
        , SearchResults(getResults, totalHits)
        , SearchResult(score, result)
        , search
+
+         -- * multiGet api
+       , MultigetResults(..)
+       , multiGet
        ) where
 
 import           Control.Applicative
@@ -83,6 +87,7 @@ instance FromJSON BulkResults where
   parseJSON (Object o) = do
     res <- mapM parseJSON =<< (o .: "items")
     return $ BulkResults res
+  parseJSON _ = mzero
 
 -- TODO not just "index"
 instance FromJSON BulkResult where
@@ -95,6 +100,7 @@ instance FromJSON BulkResult where
       <*> body .: "_id"
       <*> body .: "_type"
       <*> body .: "_version"
+  parseJSON _ = mzero
 
 --------------------------------------------------------------------------------
 -- | A connection an elasticsearch server.
@@ -216,6 +222,16 @@ data SearchResults d = SearchResults { getResults :: [SearchResult d]
 data SearchResult d = SearchResult { score  :: Double
                                    , result :: d
                                    }
+data MultigetResults d = MultigetResults { mgGetResults :: [d] }
+
+instance (FromJSON d) => FromJSON (MultigetResults d) where
+  parseJSON (Object v) = MultigetResults <$> results
+    where results = do
+            d <- (v .: "docs")
+            mapM (\x -> x .: "_source" >>= parseJSON) d
+
+  parseJSON v = typeMismatch "MultigetResults" v
+
 
 instance (FromJSON d) => FromJSON (SearchResults d) where
   parseJSON (Object v) = SearchResults <$> results <*> hits
@@ -256,6 +272,23 @@ search es index offset query =
                      , ("from", show offset)
                      ]
 
+multiGet :: forall doc . Document doc =>
+            ElasticSearch -> String -> [Char8.ByteString] -> IO (MultigetResults doc)
+multiGet es index ids = dispatchRequest es POST path body >>= parseSearchResults
+  where
+    Just path = parseRelativeReference $ intercalate "/" [index, dt, "_mget"]
+    dt = unDocumentType (documentType :: DocumentType doc)
+    body = Just $ encode $ object ["ids" .= ids]
+    parseSearchResults sJson = case parse json sJson of
+      (Done _ r) -> case parseEither parseJSON r of
+        Right res -> return res
+        Left e -> error e
+      (Fail a b c) -> error $ show (a,b,c)
+
+
+
+
+refresh :: ElasticSearch -> String -> IO ()
 refresh es index = do
   void $ dispatchRequest es GET path Nothing
     where Just path = parseRelativeReference (index ++ "/_refresh")

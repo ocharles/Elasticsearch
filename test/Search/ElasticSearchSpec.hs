@@ -1,8 +1,8 @@
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE OverloadedStrings   #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 module Search.ElasticSearchSpec where
 
 import           Control.Applicative
-import           Control.Concurrent
 import           Control.Concurrent.Async
 import           Control.Exception
 import           Control.Monad
@@ -30,9 +30,12 @@ instance ToJSON Tweet where
 instance FromJSON Tweet where
   parseJSON (Object o) = Tweet <$> o .: "tweet"
                                <*> o .: "user"
+  parseJSON _ = mzero
 
+fakeBulk :: Document a => ElasticSearch -> String -> t -> [a] -> IO ()
 fakeBulk s i _ docs = forM_ docs $ \d -> indexDocument s i d
 
+asyncMap :: (t -> IO a) -> [t] -> IO [a]
 asyncMap f [] = return []
 asyncMap f (x:xs) = do
   (a,b) <- concurrently (f x) (asyncMap f xs)
@@ -95,9 +98,14 @@ spec = do
       breathe
       newdocs <- liftIO $ findOllie
       (totalHits newdocs) `shouldBe` (fromIntegral docNum)
+      -- check we can multiGet them too
+      (MultigetResults fetchedDocs :: MultigetResults Tweet) <- liftIO $ multiGet localServer twitterIndex successes
+
+      (length fetchedDocs) `shouldBe` (fromIntegral $ length successes)
 
 
     it "can handle many simultaneous bulk requests" $ do
+      pending
       let docNum = 1000
           -- Ollie - this is the variable to tweak. around 10 on my
           -- machine is relatively reliable, higher invariably breaks.
