@@ -7,17 +7,19 @@ import           Control.Concurrent.Async
 import           Control.Exception
 import           Control.Monad
 import           Control.Monad.IO.Class
+import           Control.Monad.Loops        (unfoldM)
 import           Data.Aeson
 import qualified Data.ByteString.Lazy.Char8 as Char8
+import qualified Data.List                  as List
 import           Data.Maybe
 import qualified Data.Text                  as Text
 import           Search.ElasticSearch
 import           Test.Hspec
-
 -- TODO get a better bracket pattern, the ES functions throw exceptions.
+import           Network.URI
 
 data Tweet = Tweet String String
-           deriving (Show,Eq)
+           deriving (Show,Eq,Ord)
 
 instance Document Tweet where
   documentKey (Tweet a b) = Text.pack $ a ++ b
@@ -59,6 +61,7 @@ spec = do
   describe "Search.ElasticSearch" $ do
     let twitterIndex = "twitter"
         tweet = Tweet "Hello world!" "Ollie"
+        -- localServer = ElasticSearch (fromJust $ parseURI "http://127.0.0.1:9999") "haskell/elasticsearch"
 
         ignore :: ErrorCall -> IO ()
         ignore s = print s
@@ -103,7 +106,6 @@ spec = do
 
       (length fetchedDocs) `shouldBe` (fromIntegral $ length successes)
 
-
     it "can handle many simultaneous bulk requests" $ do
       pending
       let docNum = 1000
@@ -130,6 +132,17 @@ spec = do
       map (totalHits . fst) results `shouldBe` replicate numThreads (fromIntegral docNum)
       liftIO $ putStrLn "second"
 
+    it "understands scrolls" $ do
+      delete
+      create
+      breathe
+      let input =              [ Tweet (show x) "userkey" | x <- [1..150]]
+      _ <- bulkIndexDocuments localServer twitterIndex (Just 47) input
+      breathe
+      scroller <- scrolledSearch localServer twitterIndex "user:userkey" Nothing
+      -- scrolledRes <- unfoldM scroller
+      scrolledRes <- unfoldM scroller
+      List.sort (concat scrolledRes) `shouldBe` List.sort input
   -- it "can handle simultaneous bulk requests" $ do
   --     let docNum = 1000
   --         numThreads = 199

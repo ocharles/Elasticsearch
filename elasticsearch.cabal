@@ -46,4 +46,6 @@ test-suite tests
                    transformers,
                    text,
                    async,
-                   bytestring
+                   bytestring,
+                   monad-loops,
+                   network

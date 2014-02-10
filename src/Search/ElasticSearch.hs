@@ -30,6 +30,7 @@ module Search.ElasticSearch
        , SearchResults(getResults, totalHits)
        , SearchResult(score, result)
        , search
+       , scrolledSearch
 
          -- * multiGet api
        , MultigetResults(..)
@@ -38,7 +39,8 @@ module Search.ElasticSearch
 
 import           Control.Applicative
 import           Data.List                  (intercalate)
-import           Data.Maybe                 (catMaybes, fromJust, isNothing)
+import           Data.Maybe                 (catMaybes, fromJust, fromMaybe,
+                                             isNothing, maybeToList)
 
 import qualified Data.ByteString.Lazy       as BS
 import qualified Data.ByteString.Lazy.Char8 as Char8
@@ -50,6 +52,7 @@ import           Data.Aeson                 (FromJSON, ToJSON, Value (..),
                                              (.:), (.=))
 import           Data.Aeson.Types           (object, parseEither, typeMismatch)
 import           Data.Attoparsec.Lazy       (Result (..), parse)
+import           Data.IORef
 import           Data.List.Split            (chunksOf)
 import           Data.Text                  (Text)
 import           Network.BufferType         (BufferOp, BufferType, buf_empty,
@@ -195,9 +198,10 @@ bulkIndexDocuments es index mchunk documents  = do
       print x
 
     return (failures, successes)
-  where -- path = documentIndexPath document index
-        chunkSize = maybe 1000 id mchunk
-        Just bulkEndpoint = parseRelativeReference "/_bulk"
+  where
+    defaultChunkSize = 1000
+    chunkSize = fromMaybe defaultChunkSize mchunk
+    Just bulkEndpoint = parseRelativeReference "/_bulk"
 
 aggregateRep :: forall doc. Document doc => String -> [doc] -> Char8.ByteString
 aggregateRep index docs = (Char8.intercalate "\n" $ map inlineRep docs) `Char8.append` "\n"
@@ -223,6 +227,8 @@ data SearchResult d = SearchResult { score  :: Double
                                    , result :: d
                                    }
 data MultigetResults d = MultigetResults { mgGetResults :: [d] }
+type Field = Text
+
 
 instance (FromJSON d) => FromJSON (MultigetResults d) where
   parseJSON (Object v) = MultigetResults <$> results
@@ -262,11 +268,7 @@ search es index offset query =
           Nothing -> error "Could not form search query"
           Just uri ->
             uri { uriQuery = "?" ++ queryString }
-        parseSearchResults sJson = case parse json sJson of
-          (Done _ r) -> case parseEither parseJSON r of
-            Right res -> return res
-            Left e -> error e
-          (Fail a b c) -> error $ show (a,b,c)
+
         queryString = intercalate "&" $ (\(k, v) -> k ++ "=" ++ v) `map` queryParts
         queryParts = [ ("q", escapeURIString isUnescapedInURI (T.unpack query))
                      , ("from", show offset)
@@ -279,14 +281,72 @@ multiGet es index ids = dispatchRequest es POST path body >>= parseSearchResults
     Just path = parseRelativeReference $ intercalate "/" [index, dt, "_mget"]
     dt = unDocumentType (documentType :: DocumentType doc)
     body = Just $ encode $ object ["ids" .= ids]
-    parseSearchResults sJson = case parse json sJson of
-      (Done _ r) -> case parseEither parseJSON r of
-        Right res -> return res
-        Left e -> error e
-      (Fail a b c) -> error $ show (a,b,c)
+
+data ScrollResponse = ScrollResponse { unScroll     :: Char8.ByteString,
+                                       responseHits :: Int
+                                     }
+
+instance FromJSON ScrollResponse where
+  parseJSON (Object v) = do
+    h <- v .: "hits"
+    t <- h .: "total"
+    ScrollResponse <$> v .: "_scroll_id" <*> return t
+
+  parseJSON _ = mzero
+
+data ScanResponse a = ScanResponse { unScan :: a }
+
+instance (FromJSON a) => FromJSON (ScanResponse a) where
+  parseJSON (Object v) = ScanResponse <$> (v .: "_source" >>= parseJSON)
+  parseJSON v = typeMismatch "ScanResponse" v
 
 
 
+scrolledSearch :: forall doc . Document doc => ElasticSearch -> String  -> Text -> Maybe [Field] -> IO (IO (Maybe [doc]))
+scrolledSearch es index query mfields = do
+  print ("body", body)
+  resp <- dispatchRequest es POST path body
+  putStrLn $ Char8.unpack resp
+  let Just (ScrollResponse scrollId totHits) = decode resp
+  print (scrollPath,scrollId)
+  hitsLeft <- newIORef totHits -- fix
+  return $ do
+    left <- readIORef hitsLeft
+    case left of
+      0 -> return Nothing
+      _ -> do
+        putStrLn ("Running scroll query, " ++ show left ++" left.")
+        resp <- dispatchRequest es POST scrollPath (Just scrollId)
+        print ("scrolledresp", resp)
+        (results :: SearchResults doc)  <- parseSearchResults resp
+        let currHits = totalHits results
+        print ("scrolled", totalHits results)
+        let theHits = map result . getResults $ results
+        atomicModifyIORef hitsLeft (\x -> (x-(length theHits), ()))
+        return $ Just theHits
+
+  where path = case combineParts [ index, dt, "_search" ] of
+          Nothing -> error "Could not form search query"
+          Just uri -> uri { uriQuery = "?" ++ queryString }
+
+        queryString = intercalate "&" $ (\(k, v) -> k ++ "=" ++ v) `map` queryParts
+        queryParts = [ ("search_type", "scan")
+                     , ("scroll",      "5m")
+                     , ("size",        "20")]
+
+        -- this is bletcherous. should encode all possible queries as
+        -- a data type
+        maybefields = map ("fields" .=) $ maybeToList mfields
+
+        body = Just $ encode $ object (maybefields ++ [
+                                          "query"  .= object [
+                                             "query_string" .= object [
+                                                "query" .= query ]]])
+
+        scrollPath = case combineParts [ "_search", "scroll" ] of
+          Nothing -> error "could not form scroll query"
+          Just uri -> uri { uriQuery = "?scroll=5m" }
+        dt = unDocumentType (documentType :: DocumentType doc)
 
 refresh :: ElasticSearch -> String -> IO ()
 refresh es index = do
@@ -320,6 +380,7 @@ dispatchRequest es method apiCall body =
   case Just uri' of
     Nothing -> error "Could not formulate correct API call URI"
     Just uri -> do
+      print ("trying", uri,body)
       resp' <- simpleHTTP (req uri)
       case resp' of
         Left e -> error ("Failed to dispatch request: " ++ show e)
@@ -346,3 +407,10 @@ bops = bufferOps
 
 formatResponseCode :: (Int, Int, Int) -> Int
 formatResponseCode (x, y, z) = x*100 + y*10 + z
+
+parseSearchResults :: (Monad m, FromJSON a) => Char8.ByteString -> m a
+parseSearchResults sJson = case parse json sJson of
+          (Done _ r) -> case parseEither parseJSON r of
+            Right res -> return res
+            Left e -> error e
+          (Fail a b c) -> error $ show (a,b,c)
