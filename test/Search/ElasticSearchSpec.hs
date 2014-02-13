@@ -139,10 +139,13 @@ spec = do
       let input =              [ Tweet (show x) "userkey" | x <- [1..150]]
       _ <- bulkIndexDocuments localServer twitterIndex (Just 47) input
       breathe
-      scroller <- scrolledSearch localServer twitterIndex "user:userkey" Nothing
+      scroller <- scrolledSearch localServer twitterIndex "user:userkey"  (Just 15) Nothing
       -- scrolledRes <- unfoldM scroller
       scrolledRes <- unfoldM scroller
       List.sort (concat scrolledRes) `shouldBe` List.sort input
+      print (map length scrolledRes)
+      -- we have five shards, so we get 75 results back
+      length (head scrolledRes) `shouldBe` 75
   -- it "can handle simultaneous bulk requests" $ do
   --     let docNum = 1000
   --         numThreads = 199

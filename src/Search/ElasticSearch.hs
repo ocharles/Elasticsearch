@@ -302,8 +302,8 @@ instance (FromJSON a) => FromJSON (ScanResponse a) where
 
 
 
-scrolledSearch :: forall doc . Document doc => ElasticSearch -> String  -> Text -> Maybe [Field] -> IO (IO (Maybe [doc]))
-scrolledSearch es index query mfields = do
+scrolledSearch :: forall doc . Document doc => ElasticSearch -> String  -> Text -> Maybe Int -> Maybe [Field] -> IO (IO (Maybe [doc]))
+scrolledSearch es index query mpagesize mfields = do
   print ("body", body)
   resp <- dispatchRequest es POST path body
   putStrLn $ Char8.unpack resp
@@ -332,8 +332,9 @@ scrolledSearch es index query mfields = do
         queryString = intercalate "&" $ (\(k, v) -> k ++ "=" ++ v) `map` queryParts
         queryParts = [ ("search_type", "scan")
                      , ("scroll",      "5m")
-                     , ("size",        "20")]
+                     , ("size",        show pagesize)]
 
+        pagesize = fromMaybe 1000 mpagesize
         -- this is bletcherous. should encode all possible queries as
         -- a data type
         maybefields = map ("fields" .=) $ maybeToList mfields
@@ -345,7 +346,7 @@ scrolledSearch es index query mfields = do
 
         scrollPath = case combineParts [ "_search", "scroll" ] of
           Nothing -> error "could not form scroll query"
-          Just uri -> uri { uriQuery = "?scroll=5m" }
+          Just uri -> uri { uriQuery = "?scroll=5m&size=" ++ show pagesize }
         dt = unDocumentType (documentType :: DocumentType doc)
 
 refresh :: ElasticSearch -> String -> IO ()
