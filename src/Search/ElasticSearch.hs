@@ -223,12 +223,26 @@ data SearchResults d = SearchResults { getResults :: [SearchResult d]
                                      , totalHits  :: Integer
                                      }
 
+data ScrolledSearchResults d = ScrolledSearchResults Integer [ScrolledSearchResult d]
+
+data ScrolledSearchResult d = ScrolledSearchResult Double d
+
+
 data SearchResult d = SearchResult { score  :: Double
                                    , result :: d
                                    }
 data MultigetResults d = MultigetResults { mgGetResults :: [d] }
 type Field = Text
 
+instance (FromJSON d) =>  FromJSON (ScrolledSearchResults d) where
+  parseJSON (Object v) = ScrolledSearchResults <$> ((v .: "hits") >>= (.: "total"))
+                                               <*> ((v .: "hits") >>= (.: "hits") >>= mapM parseJSON)
+  parseJSON v = typeMismatch "ScrolledSearchResults" v
+
+instance (FromJSON d) => FromJSON (ScrolledSearchResult d) where
+  parseJSON (Object o) = ScrolledSearchResult <$> o .: "_score"
+                                              <*> (o .: "fields" >>= parseJSON)
+  parseJSON v = typeMismatch "SearchResult" v
 
 instance (FromJSON d) => FromJSON (MultigetResults d) where
   parseJSON (Object v) = MultigetResults <$> results
@@ -301,29 +315,29 @@ instance (FromJSON a) => FromJSON (ScanResponse a) where
   parseJSON v = typeMismatch "ScanResponse" v
 
 
+-- | we mandate desired fields because it's too much of a pain in the
+--   arse to parse the different format we get back when we don't specify.
 
-scrolledSearch :: forall doc . Document doc => ElasticSearch -> String  -> Text -> Maybe Int -> Maybe [Field] -> IO (IO (Maybe [doc]))
-scrolledSearch es index query mpagesize mfields = do
+scrolledSearch :: forall doc . Document doc => ElasticSearch -> String  -> Text -> Maybe Int -> [Field] -> IO (IO (Maybe [doc]))
+scrolledSearch es index query mpagesize fields = do
   print ("body", body)
   resp <- dispatchRequest es POST path body
-  putStrLn $ Char8.unpack resp
+  putStrLn ("es response: " ++ Char8.unpack resp)
   let Just (ScrollResponse scrollId totHits) = decode resp
-  print (scrollPath,scrollId)
   hitsLeft <- newIORef totHits -- fix
   return $ do
+    print ("beginning scroll", totHits, scrollPath,scrollId)
     left <- readIORef hitsLeft
     case left of
-      0 -> return Nothing
+      0 -> putStrLn "scroll finished" >> return Nothing
       _ -> do
         putStrLn ("Running scroll query, " ++ show left ++" left.")
         resp <- dispatchRequest es POST scrollPath (Just scrollId)
-        print ("scrolledresp", resp)
-        (results :: SearchResults doc)  <- parseSearchResults resp
-        let currHits = totalHits results
-        print ("scrolled", totalHits results)
-        let theHits = map result . getResults $ results
-        atomicModifyIORef hitsLeft (\x -> (x-(length theHits), ()))
-        return $ Just theHits
+        putStrLn ("Finished scroll query, " ++ show left ++" left.")
+        (ScrolledSearchResults currHits docs :: ScrolledSearchResults doc)  <- parseSearchResults resp
+        print ("scrolled", currHits)
+        atomicModifyIORef hitsLeft (\x -> (x-(length docs), ()))
+        return $ Just $ map (\(ScrolledSearchResult _ x) -> x) docs
 
   where path = case combineParts [ index, dt, "_search" ] of
           Nothing -> error "Could not form search query"
@@ -337,12 +351,11 @@ scrolledSearch es index query mpagesize mfields = do
         pagesize = fromMaybe 1000 mpagesize
         -- this is bletcherous. should encode all possible queries as
         -- a data type
-        maybefields = map ("fields" .=) $ maybeToList mfields
 
-        body = Just $ encode $ object (maybefields ++ [
-                                          "query"  .= object [
-                                             "query_string" .= object [
-                                                "query" .= query ]]])
+        body = Just $ encode $ object (["fields" .= fields,
+                                        "query"  .= object [
+                                          "query_string" .= object [
+                                             "query" .= query ]]])
 
         scrollPath = case combineParts [ "_search", "scroll" ] of
           Nothing -> error "could not form scroll query"
@@ -409,9 +422,9 @@ bops = bufferOps
 formatResponseCode :: (Int, Int, Int) -> Int
 formatResponseCode (x, y, z) = x*100 + y*10 + z
 
-parseSearchResults :: (Monad m, FromJSON a) => Char8.ByteString -> m a
+parseSearchResults :: (FromJSON a) => Char8.ByteString -> IO a
 parseSearchResults sJson = case parse json sJson of
           (Done _ r) -> case parseEither parseJSON r of
             Right res -> return res
-            Left e -> error e
-          (Fail a b c) -> error $ show (a,b,c)
+            Left e -> print ("parseSearchResults", e, sJson) >> error (show e)
+          (Fail a b c) -> print ("parseSearchresults", a,b,c,sJson) >> error "fail"

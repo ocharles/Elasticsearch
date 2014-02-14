@@ -139,7 +139,7 @@ spec = do
       let input =              [ Tweet (show x) "userkey" | x <- [1..150]]
       _ <- bulkIndexDocuments localServer twitterIndex (Just 47) input
       breathe
-      scroller <- scrolledSearch localServer twitterIndex "user:userkey"  (Just 15) Nothing
+      scroller <- scrolledSearch localServer twitterIndex "user:userkey"  (Just 15) ["tweet", "user"]
       -- scrolledRes <- unfoldM scroller
       scrolledRes <- unfoldM scroller
       List.sort (concat scrolledRes) `shouldBe` List.sort input
